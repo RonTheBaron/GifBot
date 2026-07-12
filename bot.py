@@ -2,15 +2,21 @@
 Discord GIF Bot - Headless version for 24/7 hosting (Railway, VPS, etc.)
 --------------------------------------------------------------------------
 Slash commands: /random, /gif, /gifs, /add, /addmany, /remove, /tag, /list,
-                /search, /stats, /tagcount, /caption, /vote, /help
+                /search, /stats, /tagcount, /caption, /vote, /sendall, /help
 
 Each Discord server (guild) gets its own separate GIF collection - so it's
 a proper shared "server collection" that anyone in that server can add to
 and use, without mixing with GIFs from any other server the bot is in.
 
+PERSISTENCE: data is stored as JSON at DATA_DIR/gifs_data.json. On Railway,
+plain filesystem writes are NOT guaranteed to survive a redeploy unless a
+Volume is attached. Set the DATA_DIR environment variable to the mount path
+of a Railway Volume (e.g. "/data") so GIFs survive every update. If DATA_DIR
+isn't set, it falls back to the script's own folder (fine for local/VPS use
+where the disk is already persistent).
+
 No GUI, no config.json with secrets - the bot token comes from an
-environment variable (DISCORD_BOT_TOKEN), and GIFs are stored in
-gifs_data.json which lives alongside this script.
+environment variable (DISCORD_BOT_TOKEN).
 
 Requires: pip install -U discord.py
 """
@@ -28,13 +34,16 @@ from discord import app_commands
 
 TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 GUILD_ID = os.environ.get("GUILD_ID")  # optional - instant command sync to one server
-DATA_FILE = "gifs_data.json"
+DATA_DIR = os.environ.get("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+DATA_FILE = os.path.join(DATA_DIR, "gifs_data.json")
 
 if not TOKEN:
     raise RuntimeError(
         "DISCORD_BOT_TOKEN environment variable is not set. "
         "On Railway, add it under your service's Variables tab."
     )
+
+os.makedirs(DATA_DIR, exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -53,8 +62,11 @@ def load_data():
 
 
 def save_data(data):
-    with open(DATA_FILE, "w", encoding="utf8") as f:
+    """Write atomically (temp file + rename) so a crash mid-save can't corrupt gifs_data.json."""
+    tmp_path = DATA_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf8") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp_path, DATA_FILE)
 
 
 all_data = load_data()
@@ -118,6 +130,37 @@ async def random_cmd(interaction: discord.Interaction):
         return
     gif = random.choice(gifs)
     await interaction.response.send_message(gif["url"])
+
+
+@client.tree.command(name="sendall", description="Post every GIF in this server's collection (or just one tag)")
+@app_commands.describe(tag="Only send GIFs with this tag (optional)")
+async def sendall_cmd(interaction: discord.Interaction, tag: str = ""):
+    if not require_guild(interaction):
+        await interaction.response.send_message("This only works inside a server.", ephemeral=True)
+        return
+    gifs = get_gifs(interaction.guild_id)
+    pool = gifs
+    if tag.strip():
+        pool = [g for g in gifs if tag.lower() in g.get("tag", "").lower()]
+    if not pool:
+        await interaction.response.send_message("No matching GIFs to send.", ephemeral=True)
+        return
+
+    # Discord slash commands must get an initial response within 3 seconds,
+    # so for a big collection we acknowledge first, then post the rest as
+    # regular follow-up messages in the channel.
+    if len(pool) > 30:
+        await interaction.response.send_message(
+            f"That's {len(pool)} GIFs - sending the first 30 to avoid spamming the channel too hard. "
+            f"Use a tag to narrow it down if you want the rest.",
+            ephemeral=True,
+        )
+        pool = pool[:30]
+    else:
+        await interaction.response.send_message(f"Sending {len(pool)} GIF(s)...", ephemeral=True)
+
+    for gif in pool:
+        await interaction.channel.send(gif["url"])
 
 
 @client.tree.command(name="gif", description="Send a GIF that matches a tag")
