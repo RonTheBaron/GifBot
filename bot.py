@@ -1,7 +1,8 @@
 """
 Discord GIF Bot - Headless version for 24/7 hosting (Railway, VPS, etc.)
 --------------------------------------------------------------------------
-Slash commands: /random, /gif, /gifs, /add, /remove, /list
+Slash commands: /random, /gif, /gifs, /add, /addmany, /remove, /list,
+                /search, /stats, /tagcount, /caption, /vote, /help
 
 No GUI, no config.json with secrets - the bot token comes from an
 environment variable (DISCORD_BOT_TOKEN), and the GIF list is stored
@@ -178,6 +179,133 @@ async def list_cmd(interaction: discord.Interaction):
     if len(text) > 1900:
         text = text[:1900] + "\n... (list truncated)"
     await interaction.response.send_message(text, ephemeral=True)
+
+
+@client.tree.command(name="addmany", description="Add several GIF URLs at once (one per line)")
+@app_commands.describe(
+    urls="Paste multiple URLs, one per line (or separated by spaces)",
+    tag="Tag to apply to all of them (optional)",
+)
+async def addmany_cmd(interaction: discord.Interaction, urls: str, tag: str = ""):
+    candidates = [u.strip() for u in urls.replace(",", "\n").split() if u.strip()]
+    if not candidates:
+        await interaction.response.send_message("Didn't find any URLs in that.", ephemeral=True)
+        return
+
+    existing_urls = {g["url"] for g in gifs}
+    added, skipped = 0, 0
+    for u in candidates:
+        if not u.startswith(("http://", "https://")):
+            skipped += 1
+            continue
+        if u in existing_urls:
+            skipped += 1
+            continue
+        gifs.append({"url": u, "tag": tag.strip()})
+        existing_urls.add(u)
+        added += 1
+
+    save_gifs(gifs)
+    await interaction.response.send_message(
+        f"Added {added} GIF(s), skipped {skipped} (duplicates or invalid links). "
+        f"Total: {len(gifs)}."
+    )
+
+
+@client.tree.command(name="search", description="Search saved GIFs by URL or tag text")
+@app_commands.describe(query="Text to search for")
+async def search_cmd(interaction: discord.Interaction, query: str):
+    q = query.lower().strip()
+    matches = [g for g in gifs if q in g["url"].lower() or q in g.get("tag", "").lower()]
+    if not matches:
+        await interaction.response.send_message(f"No matches for '{query}'.", ephemeral=True)
+        return
+    lines = []
+    for g in matches[:15]:
+        idx = gifs.index(g) + 1
+        tag = f" [{g['tag']}]" if g.get("tag") else ""
+        lines.append(f"{idx}.{tag} {g['url']}")
+    extra = f"\n...and {len(matches) - 15} more" if len(matches) > 15 else ""
+    await interaction.response.send_message(
+        f"Found {len(matches)} match(es):\n" + "\n".join(lines) + extra, ephemeral=True
+    )
+
+
+@client.tree.command(name="stats", description="Show stats about the saved GIF collection")
+async def stats_cmd(interaction: discord.Interaction):
+    total = len(gifs)
+    tagged = sum(1 for g in gifs if g.get("tag", "").strip())
+    untagged = total - tagged
+    tag_counts = {}
+    for g in gifs:
+        t = g.get("tag", "").strip()
+        if t:
+            tag_counts[t] = tag_counts.get(t, 0) + 1
+    top = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+    top_text = ", ".join(f"{name} ({count})" for name, count in top) if top else "none yet"
+
+    embed = discord.Embed(title="GIF Collection Stats", color=discord.Color.blurple())
+    embed.add_field(name="Total GIFs", value=str(total), inline=True)
+    embed.add_field(name="Tagged", value=str(tagged), inline=True)
+    embed.add_field(name="Untagged", value=str(untagged), inline=True)
+    embed.add_field(name="Unique tags", value=str(len(tag_counts)), inline=True)
+    embed.add_field(name="Top tags", value=top_text, inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@client.tree.command(name="tagcount", description="Show how many GIFs each tag has")
+async def tagcount_cmd(interaction: discord.Interaction):
+    tag_counts = {}
+    for g in gifs:
+        t = g.get("tag", "").strip() or "(untagged)"
+        tag_counts[t] = tag_counts.get(t, 0) + 1
+    if not tag_counts:
+        await interaction.response.send_message("No GIFs saved yet.", ephemeral=True)
+        return
+    lines = [f"{name}: {count}" for name, count in sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)]
+    await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+
+@client.tree.command(name="caption", description="Send a random (or tagged) GIF with your own caption")
+@app_commands.describe(caption="Text to show above the GIF", tag="Only pick from GIFs with this tag (optional)")
+async def caption_cmd(interaction: discord.Interaction, caption: str, tag: str = ""):
+    pool = gifs
+    if tag.strip():
+        pool = [g for g in gifs if tag.lower() in g.get("tag", "").lower()]
+    if not pool:
+        await interaction.response.send_message("No matching GIFs to caption.", ephemeral=True)
+        return
+    gif = random.choice(pool)
+    await interaction.response.send_message(f"{caption}\n{gif['url']}")
+
+
+@client.tree.command(name="vote", description="Post a GIF with thumbs up/down reactions for the chat to vote on")
+@app_commands.describe(tag="Only pick from GIFs with this tag (optional)")
+async def vote_cmd(interaction: discord.Interaction, tag: str = ""):
+    pool = gifs
+    if tag.strip():
+        pool = [g for g in gifs if tag.lower() in g.get("tag", "").lower()]
+    if not pool:
+        await interaction.response.send_message("No matching GIFs to vote on.", ephemeral=True)
+        return
+    gif = random.choice(pool)
+    await interaction.response.send_message(f"Vote time!\n{gif['url']}")
+    msg = await interaction.original_response()
+    await msg.add_reaction("👍")
+    await msg.add_reaction("👎")
+
+
+@client.tree.command(name="help", description="Show all available commands")
+async def help_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="GIF Bot Commands",
+        description="Here's everything I can do:",
+        color=discord.Color.green(),
+    )
+    for cmd in sorted(client.tree.get_commands(), key=lambda c: c.name):
+        params = ", ".join(f"{p.name}" for p in cmd.parameters) if cmd.parameters else "no options"
+        embed.add_field(name=f"/{cmd.name}", value=f"{cmd.description}\n*({params})*", inline=False)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 client.run(TOKEN)
