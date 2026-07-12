@@ -165,6 +165,29 @@ async def remove_cmd(interaction: discord.Interaction, index: int):
     await interaction.response.send_message(f"Removed GIF #{index} ({removed['url'][:60]}).", ephemeral=True)
 
 
+@client.tree.command(name="tag", description="Add a tag to an untagged GIF, or change its existing tag")
+@app_commands.describe(
+    index="The number shown next to the GIF in /list",
+    tag="The new tag to set (leave blank to clear the tag)",
+)
+async def tag_cmd(interaction: discord.Interaction, index: int, tag: str = ""):
+    if index < 1 or index > len(gifs):
+        await interaction.response.send_message(
+            f"Pick a number between 1 and {len(gifs)}. Use /list to see them.", ephemeral=True
+        )
+        return
+    gif = gifs[index - 1]
+    old_tag = gif.get("tag", "").strip()
+    gif["tag"] = tag.strip()
+    save_gifs(gifs)
+
+    if tag.strip():
+        msg = f"GIF #{index} tag set to '{tag.strip()}'" + (f" (was '{old_tag}')" if old_tag else "") + "."
+    else:
+        msg = f"GIF #{index} tag cleared."
+    await interaction.response.send_message(msg, ephemeral=True)
+
+
 @client.tree.command(name="list", description="List all saved GIFs with their numbers")
 async def list_cmd(interaction: discord.Interaction):
     if not gifs:
